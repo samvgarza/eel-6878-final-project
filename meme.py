@@ -9,7 +9,7 @@ import pyarrow.dataset as ds
 import pyarrow as pa
 import numpy as np
 
-dataset = ds.dataset("/root/eel-final-project/sitc_country_country_product_year_4_1962_1969.parquet", format="parquet")
+dataset = ds.dataset("/root/eel-6878-final-project/sitc_country_country_product_year_4_1962_1969.parquet", format="parquet")
 table = dataset.to_table()
 indices = np.random.choice(table.num_rows, 50000, replace=False)
 sample = table.take(pa.array(indices))

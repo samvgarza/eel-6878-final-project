@@ -387,7 +387,7 @@ def get_data_summary(df):
 
 def main():
     # Define paths
-    data_dir = "/root/eel-final-project"  # Update with your actual path
+    data_dir = "/root/eel-6878-final-project"  # Update with your actual path
     output_dir = "trade_network_analysis"
 
     # Create output directories
