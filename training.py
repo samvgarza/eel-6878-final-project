@@ -1,150 +1,165 @@
-import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
+import numpy as np
 
-def prepare_training_data(yearly_graphs, years, window_size=5):
-    """
-    Prepare training data with a sliding window of graph snapshots.
-    Each sample consists of window_size previous years and targets the next year.
-    """
-    X, y = [], []
-    for i in range(len(years) - window_size):
-        # Input: graph sequence for window_size years
-        input_years = years[i:i+window_size]
-        input_graphs = [yearly_graphs[year] for year in input_years]
 
-        # Target: edges in the next year
-        target_year = years[i+window_size]
-        target_graph = yearly_graphs[target_year]
-
-        # Get positive examples (edges that exist in target_year but not in the last input year)
-        last_input_year = input_years[-1]
-        last_input_graph = yearly_graphs[last_input_year]
-
-        # Get edges that exist in target_year
-        target_edges = []
-        if ('country', 'exports', 'product') in target_graph.edge_index_dict:
-            target_edges = target_graph[('country', 'exports', 'product')].edge_index.t().tolist()
-
-        # Check which edges didn't exist in the last input year
-        new_edges = []
-        if ('country', 'exports', 'product') in last_input_graph.edge_index_dict:
-            last_edges = set(map(tuple, last_input_graph[('country', 'exports', 'product')].edge_index.t().tolist()))
-            new_edges = [(src, dst) for src, dst in target_edges if (src, dst) not in last_edges]
-        else:
-            new_edges = target_edges
-
-        # Add positive examples
-        for src, dst in new_edges:
-            X.append((input_graphs, src, dst))
-            y.append(1)
-
-        # Add negative examples (randomly sample non-existent edges)
-        num_countries = input_graphs[-1]['country'].num_nodes
-        num_products = input_graphs[-1]['product'].num_nodes
-
-        # Create sets for faster lookup
-        target_edges_set = set(map(tuple, target_edges))
-
-        last_edges_set = set()
-        if ('country', 'exports', 'product') in last_input_graph.edge_index_dict:
-            last_edges_set = set(map(tuple, last_input_graph[('country', 'exports', 'product')].edge_index.t().tolist()))
-
-        # Match the number of positive examples with negative examples
-        neg_samples_needed = len(new_edges)
-        neg_samples = 0
-        max_attempts = neg_samples_needed * 10  # Allow more attempts to find valid negatives
-        attempts = 0
-
-        while neg_samples < neg_samples_needed and attempts < max_attempts:
-            neg_src = torch.randint(0, num_countries, (1,)).item()
-            neg_dst = torch.randint(0, num_products, (1,)).item()
-
-            # Check if this edge exists in the last input graph or target graph
-            if (neg_src, neg_dst) not in last_edges_set and (neg_src, neg_dst) not in target_edges_set:
-                X.append((input_graphs, neg_src, neg_dst))
-                y.append(0)
-                neg_samples += 1
-
-            attempts += 1
-
-        # If we couldn't find enough negative samples, just use what we have
-        if neg_samples < neg_samples_needed:
-            print(f"Warning: Could only find {neg_samples} negative samples out of {neg_samples_needed} needed")
-
-    return X, y
-
-def train_model(model, X, y, epochs=10, lr=0.0001, batch_size=32):
+def train_model(model, train_dataset, test_dataset=None, epochs=10, lr=0.0001, batch_size=32):
     """Train the temporal heterogeneous GNN model."""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(device)
+    exit()
+    model = model.to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     criterion = nn.BCELoss()
 
-    # Convert labels to tensor
-    y_tensor = torch.tensor(y, dtype=torch.float)
+    # Create a simpler collate function that processes one batch at a time
+    def collate_fn(batch):
+        # Separate the batch components
+        graph_sequences = [item[0] for item in batch]  # List of graph sequences
+        country_indices = torch.tensor([item[1] for item in batch])
+        product_indices = torch.tensor([item[2] for item in batch])
+        labels = torch.tensor([item[3] for item in batch], dtype=torch.float)
 
-    # Training loop
+        return graph_sequences, country_indices, product_indices, labels
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn
+    )
+
+    # Create test loader if test dataset is provided
+    test_loader = None
+    if test_dataset is not None:
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn
+        )
+
+    # Training loop with progress reporting
     for epoch in range(epochs):
         model.train()
         total_loss = 0
+        batch_count = 0
 
-        # Process in batches
-        indices = torch.randperm(len(X))
-        for i in range(0, len(X), batch_size):
-            print("we are getting here")
-            batch_indices = indices[i:i+batch_size]
-            batch_loss = 0
+        # Use tqdm for progress bar if available
+        try:
+            from tqdm import tqdm
+            loader_iter = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
+        except ImportError:
+            loader_iter = train_loader
+            print(f"Starting Epoch {epoch+1}/{epochs}")
 
-            for idx in batch_indices:
-                # Get sample
-                graph_sequence, country_idx, product_idx = X[idx]
-                target = y_tensor[idx]
+        for graph_sequences, country_indices, product_indices, labels in loader_iter:
+            batch_size = len(graph_sequences)
 
-                # Forward pass
-                pred = model(graph_sequence, country_idx, product_idx)
+            # Process batch
+            predictions = []
+            country_indices = country_indices.to(device)
+            product_indices = product_indices.to(device)
+            labels = labels.to(device)
 
-                # Compute loss
-                loss = criterion(pred, target.unsqueeze(0))
-                batch_loss += loss
-                print(batch_loss)
-            # Backward pass
+            # Forward pass for each sample in the batch
+            for i in range(batch_size):
+                # Move graphs to device (can't batch heterogeneous graphs easily)
+                graphs = [g.to(device) for g in graph_sequences[i]]
+
+                # Get prediction for this sample
+                pred = model(graphs, country_indices[i], product_indices[i])
+                predictions.append(pred)
+
+            # Stack predictions and compute loss for the entire batch at once
+            predictions = torch.cat(predictions, dim=0)
+            loss = criterion(predictions, labels)
+
+            # Backpropagation
             optimizer.zero_grad()
-            batch_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-            total_loss += batch_loss.item()
+            total_loss += loss.item()
+            batch_count += 1
 
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(X):.4f}")
+        avg_train_loss = total_loss / batch_count
+        print(f"Epoch {epoch+1}/{epochs}, Training Loss: {avg_train_loss:.4f}")
+
+        # Validation phase
+        if test_loader:
+            model.eval()
+            total_test_loss = 0
+            test_count = 0
+            correct_preds = 0
+            total_preds = 0
+
+            with torch.no_grad():
+                for graph_sequences, country_indices, product_indices, labels in test_loader:
+                    test_batch_size = len(graph_sequences)
+
+                    # Process test batch
+                    predictions = []
+                    country_indices = country_indices.to(device)
+                    product_indices = product_indices.to(device)
+                    labels = labels.to(device)
+
+                    for i in range(test_batch_size):
+                        graphs = [g.to(device) for g in graph_sequences[i]]
+                        pred = model(graphs, country_indices[i], product_indices[i])
+                        predictions.append(pred)
+
+                    predictions = torch.cat(predictions, dim=0)
+                    test_loss = criterion(predictions, labels)
+
+                    # Calculate accuracy
+                    binary_preds = (predictions > 0.5).float()
+                    correct_preds += (binary_preds == labels).sum().item()
+                    total_preds += labels.size(0)
+
+                    total_test_loss += test_loss.item()
+                    test_count += 1
+
+            avg_test_loss = total_test_loss / test_count
+            accuracy = correct_preds / total_preds
+            print(f"Validation Loss: {avg_test_loss:.4f}, Accuracy: {accuracy:.4f}")
 
     return model
 
-def evaluate_model(model, X_test, y_test):
+def evaluate_model(model, dataset):
     """Evaluate the model performance."""
     model.eval()
     y_pred = []
-    y_true = y_test
+    y_true = []
+
+    loader = DataLoader(
+        dataset,
+        batch_size=32,
+        collate_fn=lambda batch: (
+            [item[0] for item in batch],
+            torch.tensor([item[1] for item in batch]),
+            torch.tensor([item[2] for item in batch]),
+            torch.tensor([item[3] for item in batch])
+        )
+    )
 
     with torch.no_grad():
-        for graph_sequence, country_idx, product_idx in X_test:
-            pred = model(graph_sequence, country_idx, product_idx)
-            y_pred.append(pred.item())
-
-    # Convert to numpy arrays
-    y_pred = np.array(y_pred)
-    y_true = np.array(y_true)
+        for graph_sequences, country_idxs, product_idxs, labels in loader:
+            for i in range(len(graph_sequences)):
+                pred = model(graph_sequences[i], country_idxs[i], product_idxs[i])
+                y_pred.append(pred.item())
+                y_true.append(labels[i].item())
 
     # Compute metrics
     from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score
-
-    # Binary predictions (threshold = 0.5)
-    y_binary = (y_pred > 0.5).astype(int)
+    y_pred = np.array(y_pred)
+    y_true = np.array(y_true)
 
     auc = roc_auc_score(y_true, y_pred)
     ap = average_precision_score(y_true, y_pred)
-    acc = accuracy_score(y_true, y_binary)
-
-    print(f"Test AUC: {auc:.4f}")
-    print(f"Test AP: {ap:.4f}")
-    print(f"Test Accuracy: {acc:.4f}")
+    acc = accuracy_score(y_true, (y_pred > 0.5).astype(int))
 
     return auc, ap, acc

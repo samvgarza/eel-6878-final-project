@@ -4,167 +4,193 @@ import os
 import argparse
 from datetime import datetime
 
-# Import functions from previous modules
-# (assuming you've saved them into separate files)
-from data_processing import build_yearly_graphs
+# import our custom modules
+from data_processing import TemporalGraphDataset
 from model import TemporalHeteroGNN
-from training import prepare_training_data, train_model, evaluate_model
-from analysis import (analyze_product_space, calculate_product_proximity,
-                     visualize_product_network, analyze_country_development_paths,
-                     analyze_regional_clusters, predict_product_adoption_likelihood,
-                     identify_product_potential, visualize_product_adoption_potential)
+from training import train_model, evaluate_model
 
 def main():
-    """Main execution function for the trade prediction project."""
-    parser = argparse.ArgumentParser(description='Trade Network Analysis and Prediction')
-    parser.add_argument('--data', required=True, help='Path to the trade data CSV file')
-    parser.add_argument('--output', default='output', help='Output directory for results')
-    parser.add_argument('--years', default='1962-1969', help='Year range to use (e.g., 1990-2023)')
-    parser.add_argument('--window', type=int, default=5, help='Time window size for prediction')
-    parser.add_argument('--hidden-dim', type=int, default=64, help='Hidden dimension size')
-    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
-    parser.add_argument('--no-train', action='store_true', help='Skip training (load model instead)')
-    parser.add_argument('--model-path', default='model.pt', help='Path to save/load model')
+
+    print(torch.cuda.is_available())
+    exit()
+    # set up command line arguments
+    parser = argparse.ArgumentParser(description='Trade prediction using graph neural networks')
+
+    # add all command line arguments
+    parser.add_argument('--data', required=True, help='path to the trade data file')
+    parser.add_argument('--output', default='output', help='directory to save results')
+    parser.add_argument('--years', default='1962-1969', help='year range to analyze')
+    parser.add_argument('--window', type=int, default=5, help='number of years to use for prediction')
+    parser.add_argument('--hidden-dim', type=int, default=64, help='size of hidden layers')
+    parser.add_argument('--epochs', type=int, default=10, help='number of training iterations')
+    parser.add_argument('--no-train', action='store_true', help='skip training phase')
+    parser.add_argument('--model-path', default='model.pt', help='file to save/load model')
+    parser.add_argument('--batch-size', type=int, default=5, help='number of samples per training batch')
+
+    # parse the command line arguments
     args = parser.parse_args()
 
-    # Create output directory
-    os.makedirs(args.output, exist_ok=True)
+    # create directory for output files
+    if not os.path.exists(args.output):
+        os.makedirs(args.output)
 
-    # Set up logging
-    log_file = os.path.join(args.output, 'erm.txt')
-    def log(message):
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        with open(log_file, 'a') as f:
-            f.write(f"[{timestamp}] {message}\n")
-        print(f"[{timestamp}] {message}")
+    # set up logging to file and console
+    log_file_path = os.path.join(args.output, 'log.txt')
 
-    log(f"Starting trade network analysis with args: {args}")
+    def log_message(message):
+        # get current time for logging
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # Parse year range
-    start_year, end_year = map(int, args.years.split('-'))
+        # write to log file
+        with open(log_file_path, 'a') as log_file:
+            log_file.write(f"[{current_time}] {message}\n")
 
-    # Load data
-    log(f"Loading data from {args.data}...")
-    df = pd.read_parquet(args.data)
+        # also print to console
+        print(f"[{current_time}] {message}")
 
-    # Filter by year range
-    df = df[(df['year'] >= start_year) & (df['year'] <= end_year)]
-    log(f"Data filtered to years {start_year}-{end_year}")
+    log_message(f"starting analysis with settings: {args}")
 
-    # Build graphs
-    log("Building yearly graphs...")
-    years = sorted(df['year'].unique())
+    # process the year range input
+    year_parts = args.years.split('-')
+    start_year = int(year_parts[0])
+    end_year = int(year_parts[1])
 
-    yearly_graphs, country_mapping, product_mapping = build_yearly_graphs(df, years)
-    log(f"Built {len(yearly_graphs)} yearly graphs")
+    # load the trade data
+    log_message(f"loading data from {args.data}")
+    trade_data = pd.read_parquet(args.data)
 
-    # Initialize model
-    num_countries = max(country_mapping.values()) + 1
-    num_products = max(product_mapping.values()) + 1
-    log(f"Initializing model with {num_countries} countries and {num_products} products")
+    # filter data to only include selected years
+    trade_data = trade_data[(trade_data['year'] >= start_year) & (trade_data['year'] <= end_year)]
+    log_message(f"filtered data to years {start_year} through {end_year}")
 
-    model = TemporalHeteroGNN(num_countries, num_products, hidden_dim=args.hidden_dim)
+    # get list of unique years in the data
+    unique_years = sorted(trade_data['year'].unique())
 
+    # create dataset object for training
+    log_message("building dataset for training")
+    dataset = TemporalGraphDataset(trade_data, years=unique_years, window_size=args.window)
+    log_message(f"created dataset with {len(dataset)} training samples")
+
+    # get the country and product mappings
+    country_to_index = dataset.country_to_idx
+    product_to_index = dataset.product_to_idx
+
+    # get total number of countries and products
+    total_countries = len(country_to_index)
+    total_products = len(product_to_index)
+    log_message(f"model will use {total_countries} countries and {total_products} products")
+
+    # initialize the neural network model
+    model = TemporalHeteroGNN(total_countries, total_products, hidden_dim=args.hidden_dim)
+
+    # check if we should train or load existing model
     if not args.no_train:
-        # Prepare training data
-        log(f"Preparing training data with window size {args.window}...")
-        X, y = prepare_training_data(yearly_graphs, years, window_size=args.window)
-        log(f"Prepared {len(X)} training samples")
-
-        # Split data
+        # split data into training and testing sets
         from sklearn.model_selection import train_test_split
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        log(f"Split into {len(X_train)} training and {len(X_test)} testing samples")
+        from torch.utils.data import Subset
 
-        # Train model
-        log(f"Training model for {args.epochs} epochs...")
-        model = train_model(model, X_train, y_train, epochs=args.epochs)
+        # create list of all sample indices
+        all_indices = list(range(len(dataset)))
 
-        # Save model
-        torch.save(model.state_dict(), os.path.join(args.output, args.model_path))
-        log(f"Model saved to {os.path.join(args.output, args.model_path)}")
+        # split indices into training and testing
+        train_indices, test_indices = train_test_split(all_indices, test_size=0.2, random_state=42)
 
-        # Evaluate model
-        log("Evaluating model...")
-        auc, ap, acc = evaluate_model(model, X_test, y_test)
-        log(f"Test results - AUC: {auc:.4f}, AP: {ap:.4f}, Accuracy: {acc:.4f}")
+        # create subset datasets
+        training_data = Subset(dataset, train_indices)
+        testing_data = Subset(dataset, test_indices)
+        log_message(f"split data into {len(training_data)} training and {len(testing_data)} testing samples")
+
+        # train the model
+        log_message(f"starting training for {args.epochs} epochs")
+        model = train_model(model, training_data, epochs=args.epochs, batch_size=args.batch_size)
+
+        # save the trained model
+        model_save_path = os.path.join(args.output, args.model_path)
+        torch.save(model.state_dict(), model_save_path)
+        log_message(f"saved model to {model_save_path}")
+
+        # evaluate model performance
+        log_message("evaluating model on test data")
+        auc_score, avg_precision, accuracy = evaluate_model(model, testing_data)
+        log_message(f"test results - AUC: {auc_score:.4f}, Average Precision: {avg_precision:.4f}, Accuracy: {accuracy:.4f}")
     else:
-        # Load model
-        log(f"Loading model from {args.model_path}...")
-        model.load_state_dict(torch.load(args.model_path))
+        # load existing model
+        model_load_path = os.path.join(args.output, args.model_path)
+        model.load_state_dict(torch.load(model_load_path))
         model.eval()
+        log_message(f"loaded existing model from {model_load_path}")
 
-    # Run analyses
-    log("Running analyses...")
+    # # Run analyses
+    # log("Running analyses...")
 
-    # 1. Product Space Analysis
-    log("Analyzing product space...")
-    latest_year = max(years)
-    latest_graph = yearly_graphs[latest_year]
-    product_embeddings, product_embeddings_2d, product_names = analyze_product_space(
-        model, latest_graph, product_mapping, df)
-    log("Product space analysis complete")
+    # # 1. Product Space Analysis
+    # log("Analyzing product space...")
+    # latest_year = max(years)
+    # latest_graph = yearly_graphs[latest_year]
+    # product_embeddings, product_embeddings_2d, product_names = analyze_product_space(
+    #     model, latest_graph, product_mapping, df)
+    # log("Product space analysis complete")
 
-    # 2. Product Proximity Analysis
-    log("Calculating product proximity...")
-    proximity_matrix = calculate_product_proximity(model, latest_graph)
-    log("Visualizing product network...")
-    visualize_product_network(proximity_matrix, product_mapping, df, threshold=0.7)
-    log("Product network visualization complete")
+    # # 2. Product Proximity Analysis
+    # log("Calculating product proximity...")
+    # proximity_matrix = calculate_product_proximity(model, latest_graph)
+    # log("Visualizing product network...")
+    # visualize_product_network(proximity_matrix, product_mapping, df, threshold=0.7)
+    # log("Product network visualization complete")
 
-    # 3. Country Development Path Analysis
-    log("Analyzing country development paths...")
-    embeddings_2d_by_year, country_codes = analyze_country_development_paths(
-        model, yearly_graphs, country_mapping, df)
-    log("Country development analysis complete")
+    # # 3. Country Development Path Analysis
+    # log("Analyzing country development paths...")
+    # embeddings_2d_by_year, country_codes = analyze_country_development_paths(
+    #     model, yearly_graphs, country_mapping, df)
+    # log("Country development analysis complete")
 
-    # 4. Regional Cluster Analysis
-    log("Analyzing regional clusters...")
-    cluster_analysis, labels, country_embeddings_2d = analyze_regional_clusters(
-        model, latest_graph, country_mapping, df)
-    log("Regional cluster analysis complete")
+    # # 4. Regional Cluster Analysis
+    # log("Analyzing regional clusters...")
+    # cluster_analysis, labels, country_embeddings_2d = analyze_regional_clusters(
+    #     model, latest_graph, country_mapping, df)
+    # log("Regional cluster analysis complete")
 
-    # 5. Product Adoption Prediction
-    log("Predicting product adoption...")
-    # Get the most recent window of years
-    recent_years = years[-args.window:]
-    input_graphs = [yearly_graphs[year] for year in recent_years]
+    # # 5. Product Adoption Prediction
+    # log("Predicting product adoption...")
+    # # Get the most recent window of years
+    # recent_years = years[-args.window:]
+    # input_graphs = [yearly_graphs[year] for year in recent_years]
 
-    # Predict adoption likelihood
-    country_predictions = predict_product_adoption_likelihood(
-        model, input_graphs, country_mapping, product_mapping, df)
+    # # Predict adoption likelihood
+    # country_predictions = predict_product_adoption_likelihood(
+    #     model, input_graphs, country_mapping, product_mapping, df)
 
-    # Save predictions to file
-    import json
-    with open(os.path.join(args.output, 'country_predictions.json'), 'w') as f:
-        json.dump(country_predictions, f, indent=2)
-    log(f"Saved country predictions to {os.path.join(args.output, 'country_predictions.json')}")
+    # # Save predictions to file
+    # import json
+    # with open(os.path.join(args.output, 'country_predictions.json'), 'w') as f:
+    #     json.dump(country_predictions, f, indent=2)
+    # log(f"Saved country predictions to {os.path.join(args.output, 'country_predictions.json')}")
 
-    # 6. Global Product Potential Analysis
-    log("Analyzing global product potential...")
-    top_products = identify_product_potential(model, input_graphs, country_mapping, product_mapping, df)
+    # # 6. Global Product Potential Analysis
+    # log("Analyzing global product potential...")
+    # top_products = identify_product_potential(model, input_graphs, country_mapping, product_mapping, df)
 
-    # Save top products to file
-    with open(os.path.join(args.output, 'top_products.json'), 'w') as f:
-        json.dump(top_products, f, indent=2)
-    log(f"Saved top products to {os.path.join(args.output, 'top_products.json')}")
+    # # Save top products to file
+    # with open(os.path.join(args.output, 'top_products.json'), 'w') as f:
+    #     json.dump(top_products, f, indent=2)
+    # log(f"Saved top products to {os.path.join(args.output, 'top_products.json')}")
 
-    # Visualize product adoption potential
-    visualize_product_adoption_potential(top_products)
-    log("Product potential visualization complete")
+    # # Visualize product adoption potential
+    # visualize_product_adoption_potential(top_products)
+    # log("Product potential visualization complete")
 
-    # Print summary
-    log("Analysis complete!")
-    log(f"All results saved to {args.output}")
+    # # Print summary
+    # log("Analysis complete!")
+    # log(f"All results saved to {args.output}")
 
-    # Sample predictions for select countries
-    log("\nSample Predictions:")
-    selected_countries = ['USA', 'CHN', 'DEU', 'KOR', 'THA']
-    for country in selected_countries:
-        if country in country_predictions:
-            log(f"\nTop 5 products for {country}:")
-            for product in country_predictions[country][:5]:
-                log(f"  SITC {product['sitc_code']}: {product['probability']:.4f} probability")
+    # # Sample predictions for select countries
+    # log("\nSample Predictions:")
+    # selected_countries = ['USA', 'CHN', 'DEU', 'KOR', 'THA']
+    # for country in selected_countries:
+    #     if country in country_predictions:
+    #         log(f"\nTop 5 products for {country}:")
+    #         for product in country_predictions[country][:5]:
+    #             log(f"  SITC {product['sitc_code']}: {product['probability']:.4f} probability")
 
 if __name__ == "__main__":
     main()
