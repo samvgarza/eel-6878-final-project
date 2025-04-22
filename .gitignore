@@ -1,1 +1,10 @@
 *.parquet
+.ipynb_checkpoints/
+
+lol.ipynb
+
+*.joblib
+
+*.csv
+
+*.txt
