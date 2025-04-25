@@ -8,3 +8,7 @@ lol.ipynb
 *.csv
 
 *.txt
+
+*.pyc
+
+data_trimming.ipynb
