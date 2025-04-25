@@ -8,7 +8,7 @@ def save_trim_data(df_merged, start_year, end_year):
         os.makedirs("trim")
     df_merged.to_parquet("trim/sitc_country_country_product_year_4_"+str(start_year)+"_"+str(end_year)+".parquet", engine='pyarrow')
 
-def trim_data(df_merged, start_year, end_year, save_to_file, return_as_list, numerify):
+def trim_data(df_merged, start_year, end_year, save_to_file, return_as_list):
     #Trims data based on what common tags there are in the country and product columns, in the range provided
     earliest_year = df_merged['year'].min()
     target_year = earliest_year
@@ -86,8 +86,7 @@ def main():
     end_year = 1969
     save_to_file = True
     return_as_list = False
-    numerify = True
-    print(trim_data(gather_data(), start_year, end_year, save_to_file, return_as_list, numerify))
+    print(trim_data(gather_data(), start_year, end_year, save_to_file, return_as_list))
 
 if __name__ == "__main__":
     main()
